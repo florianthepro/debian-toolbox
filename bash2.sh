@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# curl -fsSL "https://raw.githubusercontent.com/florianthepro/debian-toolbox/main/bash2.sh" | bash
 
 set -u
 
