@@ -6,9 +6,9 @@ Direkt ausführen:
 curl -fsSL https://raw.githubusercontent.com/florianthepro/debian-toolbox/main/permissions/ordner-rechte.sh | sudo bash
 ```
 ---
-#### Graphische Ordner Zugriff verwalten
+#### Graphische Bash
 Direkt ausführen:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/florianthepro/debian-toolbox/main/permissions/ordner-rechte.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/florianthepro/debian-toolbox/main/bash2.sh | sudo bash
 ```
 ---
