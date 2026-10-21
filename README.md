@@ -18,3 +18,9 @@ Direkt ausführen:
 curl -fsSL https://raw.githubusercontent.com/florianthepro/debian-toolbox/main/fehlerfinder.sh | sudo bash
 ```
 ---
+#### Err
+Direkt ausführen:
+```bash
+curl -fsSL https://raw.githubusercontent.com/florianthepro/debian-toolbox/main/err.sh | sudo bash
+```
+---
