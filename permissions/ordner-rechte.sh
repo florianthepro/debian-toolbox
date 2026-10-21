@@ -1,225 +1,458 @@
 #!/usr/bin/env bash
+# Ausführen: curl -fsSL "https://raw.githubusercontent.com/florianthepro/debian-toolbox/main/permissions/ordner-rechte.sh" | sudo bash
 
 set -u
 
-if [ -r /dev/tty ]; then
-    exec </dev/tty >/dev/tty 2>&1
-fi
-
-ORDNER="${STARTORDNER:-$PWD}"
-
-fehler() {
-    printf 'Fehler: %s\n' "$*" >&2
+exec 3<>/dev/tty || {
+    echo "[✗] Kein interaktives Terminal verfügbar"
     exit 1
 }
 
-pause() {
-    printf '\nEnter drücken, um fortzufahren ...'
-    read -r _
+if [ "$(id -u)" -ne 0 ]; then
+    echo "[✗] Bitte mit sudo ausführen"
+    exit 1
+fi
+
+ORDNER="$(pwd -P 2>/dev/null)" || {
+    echo "[✗] Aktueller Ordner konnte nicht ermittelt werden"
+    exit 1
 }
 
-if [ "$(id -u)" -ne 0 ]; then
-    fehler "Dieses Skript muss als root oder mit sudo ausgeführt werden."
-fi
-
 if [ ! -d "$ORDNER" ]; then
-    fehler "Ordner existiert nicht: $ORDNER"
+    echo "[✗] Kein gültiger Ordner: $ORDNER"
+    exit 1
 fi
-
-ORDNER="$(cd -- "$ORDNER" 2>/dev/null && pwd -P)" ||
-    fehler "Ordner kann nicht geöffnet werden."
 
 case "$ORDNER" in
     /|/bin|/boot|/dev|/etc|/lib|/lib32|/lib64|/libx32|/proc|/root|/run|/sbin|/sys|/usr|/var)
-        printf 'WARNUNG: "%s" ist ein wichtiges Systemverzeichnis.\n' "$ORDNER"
-        printf 'Direkte Änderungen daran können das System beschädigen.\n'
-        printf 'Trotzdem fortfahren? [j/N]: '
-        read -r ANTWORT
+        echo
+        echo "[!] Kritisches Systemverzeichnis: $ORDNER"
+        printf "Wirklich verwalten? [ja/NEIN]: " >&3
+        read -r ANTWORT <&3
 
         case "$ANTWORT" in
-            j|J|ja|JA|Ja)
+            ja|JA|Ja)
                 ;;
             *)
-                printf 'Abgebrochen.\n'
+                echo "[!] Abgebrochen"
                 exit 0
                 ;;
         esac
         ;;
 esac
 
-benutzer_auswaehlen() {
-    local eintrag name uid shell
-    local -a benutzer=()
+pause() {
+    echo
+    printf "Enter drücken ..." >&3
+    read -r _ <&3
+}
 
-    while IFS=: read -r name _ uid _ _ _ shell; do
-        if [ "$uid" -ge 1000 ] &&
-           [ "$uid" -ne 65534 ] &&
-           [ "$shell" != "/usr/sbin/nologin" ] &&
-           [ "$shell" != "/sbin/nologin" ] &&
-           [ "$shell" != "/bin/false" ]; then
-            benutzer+=("$name")
+kopf() {
+    clear 2>/dev/null || true
+    echo "Ordner-Rechteverwaltung"
+    echo "========================"
+    echo "Ordner: $ORDNER"
+    echo
+}
+
+rechte_anzeigen() {
+    local besitzer
+    local gruppe
+    local rechte
+    local oktal
+    local gruppenmitglieder
+
+    besitzer="$(stat -c '%U' -- "$ORDNER")"
+    gruppe="$(stat -c '%G' -- "$ORDNER")"
+    rechte="$(stat -c '%A' -- "$ORDNER")"
+    oktal="$(stat -c '%a' -- "$ORDNER")"
+    gruppenmitglieder="$(getent group "$gruppe" | cut -d: -f4)"
+
+    [ -n "$gruppenmitglieder" ] || gruppenmitglieder="keine zusätzlichen Mitglieder"
+
+    kopf
+    echo "Aktueller Zustand"
+    echo "-----------------"
+    echo "Besitzer:          $besitzer"
+    echo "Besitzergruppe:    $gruppe"
+    echo "Rechte:            $rechte"
+    echo "Numerisch:         $oktal"
+    echo "Gruppenmitglieder: $gruppenmitglieder"
+    echo
+    echo "Besitzerrechte: ${rechte:1:3}"
+    echo "Gruppenrechte:  ${rechte:4:3}"
+    echo "Sonstige:       ${rechte:7:3}"
+}
+
+benutzer_laden() {
+    NORMALE_BENUTZER=()
+    SYSTEM_BENUTZER=()
+
+    while IFS=: read -r name _ uid_num _ _ _ shell; do
+        [ "$name" = "root" ] && continue
+        [ "$uid_num" -eq 65534 ] && continue
+
+        if [ "$uid_num" -ge 1000 ]; then
+            NORMALE_BENUTZER+=("$name")
+        else
+            SYSTEM_BENUTZER+=("$name")
         fi
     done < <(getent passwd)
+}
 
-    if [ "${#benutzer[@]}" -eq 0 ]; then
-        fehler "Keine normalen Benutzer gefunden."
+benutzer_aus_liste() {
+    local titel="$1"
+    shift
+    local liste=("$@")
+    local nummer
+    local index
+
+    kopf
+    echo "$titel"
+    echo
+
+    if [ "${#liste[@]}" -eq 0 ]; then
+        echo "[!] Keine Konten vorhanden"
+        pause
+        return 1
     fi
 
-    printf '\nBenutzer auswählen:\n\n'
+    for index in "${!liste[@]}"; do
+        printf "  [%d] %s\n" "$((index + 1))" "${liste[$index]}"
+    done
 
-    PS3=$'\nNummer eingeben oder mit Strg+C abbrechen: '
+    echo "  [0] Zurück"
+    echo
+    printf "Auswahl: " >&3
+    read -r nummer <&3
 
-    select eintrag in "${benutzer[@]}"; do
-        if [ -n "${eintrag:-}" ]; then
-            AUSGEWAEHLTER_BENUTZER="$eintrag"
-            return 0
-        fi
+    [[ "$nummer" =~ ^[0-9]+$ ]] || return 1
+    [ "$nummer" -eq 0 ] && return 1
 
-        printf 'Ungültige Auswahl.\n'
+    index=$((nummer - 1))
+
+    if [ "$index" -lt 0 ] || [ "$index" -ge "${#liste[@]}" ]; then
+        return 1
+    fi
+
+    AUSGEWAEHLTER_BENUTZER="${liste[$index]}"
+    return 0
+}
+
+benutzer_auswaehlen() {
+    local auswahl
+
+    benutzer_laden
+
+    while true; do
+        kopf
+        echo "Benutzerkategorie"
+        echo "-----------------"
+        echo "  [1] root – besonderes Administratorkonto"
+        echo "  [2] Normale Benutzer"
+        echo "  [3] Systemkonten"
+        echo "  [0] Zurück"
+        echo
+        printf "Auswahl: " >&3
+        read -r auswahl <&3
+
+        case "$auswahl" in
+            1)
+                AUSGEWAEHLTER_BENUTZER="root"
+                return 0
+                ;;
+            2)
+                benutzer_aus_liste "Normale Benutzer" "${NORMALE_BENUTZER[@]}" &&
+                    return 0
+                ;;
+            3)
+                benutzer_aus_liste "Systemkonten" "${SYSTEM_BENUTZER[@]}" &&
+                    return 0
+                ;;
+            0)
+                return 1
+                ;;
+        esac
     done
 }
 
-gruppenname_erzeugen() {
-    local basis hash
+zugriff_pruefen() {
+    local user_name="$1"
 
-    basis="$(basename -- "$ORDNER")"
+    kopf
+    echo "Effektiver Zugriff"
+    echo "------------------"
+    echo "Benutzer: $user_name"
+    echo "Ordner:   $ORDNER"
+    echo
 
-    basis="$(printf '%s' "$basis" |
-        tr '[:upper:]' '[:lower:]' |
-        tr -cd 'a-z0-9_-')"
-
-    if [ -z "$basis" ]; then
-        basis="ordner"
+    if [ "$user_name" = "root" ]; then
+        echo "[✓] root ist das Administratorkonto"
+        echo "[✓] Lesen"
+        echo "[✓] Schreiben"
+        echo "[✓] Betreten"
+        echo
+        echo "[!] root wird nicht über normale Ordnergruppen verwaltet"
+        pause
+        return
     fi
 
-    hash="$(printf '%s' "$ORDNER" | cksum | awk '{print $1}')"
+    if su -s /bin/sh "$user_name" -c 'test -r "$1"' sh "$ORDNER" 2>/dev/null; then
+        echo "[✓] Lesen"
+    else
+        echo "[✗] Lesen"
+    fi
 
-    GRUPPE="zugriff-${basis}-${hash}"
+    if su -s /bin/sh "$user_name" -c 'test -w "$1"' sh "$ORDNER" 2>/dev/null; then
+        echo "[✓] Schreiben"
+    else
+        echo "[✗] Schreiben"
+    fi
 
-    GRUPPE="${GRUPPE:0:31}"
+    if su -s /bin/sh "$user_name" -c 'test -x "$1"' sh "$ORDNER" 2>/dev/null; then
+        echo "[✓] Betreten"
+    else
+        echo "[✗] Betreten"
+    fi
+
+    echo
+    id "$user_name"
+    pause
 }
 
-rechte_auswaehlen() {
-    printf '\nRechte für "%s" auf "%s":\n\n' \
-        "$AUSGEWAEHLTER_BENUTZER" "$ORDNER"
+verwaltete_gruppe_erstellen() {
+    local hash
+    local gruppe
 
-    printf '  1) Lesen und betreten\n'
-    printf '  2) Lesen, schreiben und betreten\n'
-    printf '  3) Benutzerzugriff entfernen\n'
-    printf '  4) Nur prüfen, nichts ändern\n'
-    printf '  5) Abbrechen\n\n'
+    hash="$(printf '%s' "$ORDNER" | cksum | awk '{print $1}')"
+    gruppe="ordner-$hash"
 
-    printf 'Auswahl [1-5]: '
-    read -r AUSWAHL
+    if ! getent group "$gruppe" >/dev/null; then
+        groupadd -- "$gruppe" || {
+            echo "[✗] Gruppe konnte nicht erstellt werden"
+            pause
+            return 1
+        }
+    fi
 
-    case "$AUSWAHL" in
+    chgrp -- "$gruppe" "$ORDNER" || {
+        echo "[✗] Besitzergruppe konnte nicht geändert werden"
+        pause
+        return 1
+    }
+
+    echo "[✓] Besitzergruppe: $gruppe"
+    pause
+}
+
+vorhandene_gruppe_auswaehlen() {
+    local gruppen=()
+    local name
+    local nummer
+    local index
+
+    while IFS=: read -r name _; do
+        gruppen+=("$name")
+    done < <(getent group)
+
+    kopf
+    echo "Vorhandene Gruppe auswählen"
+    echo
+
+    for index in "${!gruppen[@]}"; do
+        printf "  [%d] %s\n" "$((index + 1))" "${gruppen[$index]}"
+    done
+
+    echo "  [0] Zurück"
+    echo
+    printf "Auswahl: " >&3
+    read -r nummer <&3
+
+    [[ "$nummer" =~ ^[0-9]+$ ]] || return
+    [ "$nummer" -eq 0 ] && return
+
+    index=$((nummer - 1))
+
+    if [ "$index" -lt 0 ] || [ "$index" -ge "${#gruppen[@]}" ]; then
+        echo "[✗] Ungültige Auswahl"
+        pause
+        return
+    fi
+
+    chgrp -- "${gruppen[$index]}" "$ORDNER" || {
+        echo "[✗] Besitzergruppe konnte nicht geändert werden"
+        pause
+        return
+    }
+
+    echo "[✓] Besitzergruppe: ${gruppen[$index]}"
+    pause
+}
+
+gruppenrechte_setzen() {
+    local auswahl
+
+    kopf
+    echo "Gruppenrechte setzen"
+    echo "--------------------"
+    echo "  [1] --- Kein Zugriff"
+    echo "  [2] --x Nur betreten"
+    echo "  [3] r-x Lesen und betreten"
+    echo "  [4] rwx Vollzugriff"
+    echo "  [0] Zurück"
+    echo
+    printf "Auswahl: " >&3
+    read -r auswahl <&3
+
+    case "$auswahl" in
+        1) chmod g=--- -- "$ORDNER" ;;
+        2) chmod g=--x -- "$ORDNER" ;;
+        3) chmod g=r-x -- "$ORDNER" ;;
+        4) chmod g=rwx -- "$ORDNER" ;;
+        0) return ;;
+        *)
+            echo "[✗] Ungültige Auswahl"
+            pause
+            return
+            ;;
+    esac
+
+    echo "[✓] Gruppenrechte wurden geändert"
+    pause
+}
+
+sonstige_rechte_setzen() {
+    local auswahl
+
+    kopf
+    echo "Rechte für alle anderen setzen"
+    echo "------------------------------"
+    echo "  [1] --- Kein Zugriff"
+    echo "  [2] --x Nur betreten"
+    echo "  [3] r-x Lesen und betreten"
+    echo "  [4] rwx Vollzugriff"
+    echo "  [0] Zurück"
+    echo
+    printf "Auswahl: " >&3
+    read -r auswahl <&3
+
+    case "$auswahl" in
+        1) chmod o=--- -- "$ORDNER" ;;
+        2) chmod o=--x -- "$ORDNER" ;;
+        3) chmod o=r-x -- "$ORDNER" ;;
+        4) chmod o=rwx -- "$ORDNER" ;;
+        0) return ;;
+        *)
+            echo "[✗] Ungültige Auswahl"
+            pause
+            return
+            ;;
+    esac
+
+    echo "[✓] Rechte für alle anderen wurden geändert"
+    pause
+}
+
+benutzer_verwalten() {
+    local gruppe
+    local auswahl
+
+    benutzer_auswaehlen || return
+
+    if [ "$AUSGEWAEHLTER_BENUTZER" = "root" ]; then
+        zugriff_pruefen root
+        return
+    fi
+
+    gruppe="$(stat -c '%G' -- "$ORDNER")"
+
+    kopf
+    echo "Benutzer verwalten"
+    echo "------------------"
+    echo "Benutzer:        $AUSGEWAEHLTER_BENUTZER"
+    echo "Besitzergruppe:  $gruppe"
+    echo
+    echo "  [1] Effektiven Zugriff prüfen"
+    echo "  [2] Zur Besitzergruppe hinzufügen"
+    echo "  [3] Aus Besitzergruppe entfernen"
+    echo "  [0] Zurück"
+    echo
+    printf "Auswahl: " >&3
+    read -r auswahl <&3
+
+    case "$auswahl" in
         1)
-            MODUS="r-x"
+            zugriff_pruefen "$AUSGEWAEHLTER_BENUTZER"
             ;;
         2)
-            MODUS="rwx"
+            usermod -aG "$gruppe" "$AUSGEWAEHLTER_BENUTZER" && {
+                echo "[✓] $AUSGEWAEHLTER_BENUTZER wurde zu $gruppe hinzugefügt"
+                echo "[!] Eine neue Anmeldung kann erforderlich sein"
+            }
+            pause
             ;;
         3)
-            MODUS="entfernen"
-            ;;
-        4)
-            MODUS="pruefen"
-            ;;
-        5)
-            printf 'Abgebrochen.\n'
-            exit 0
-            ;;
-        *)
-            fehler "Ungültige Auswahl: $AUSWAHL"
+            if id -nG "$AUSGEWAEHLTER_BENUTZER" | tr ' ' '\n' |
+                grep -Fxq -- "$gruppe"; then
+                gpasswd -d "$AUSGEWAEHLTER_BENUTZER" "$gruppe" >/dev/null && {
+                    echo "[✓] $AUSGEWAEHLTER_BENUTZER wurde aus $gruppe entfernt"
+                    echo "[!] Zugriff kann weiterhin über Besitzer- oder Sonstige-Rechte bestehen"
+                }
+            else
+                echo "[!] Benutzer ist kein Mitglied von $gruppe"
+            fi
+            pause
             ;;
     esac
 }
 
-zugriff_pruefen() {
-    local lesen="nein"
-    local schreiben="nein"
-    local betreten="nein"
+gruppen_verwalten() {
+    local auswahl
 
-    if su -s /bin/sh "$AUSGEWAEHLTER_BENUTZER" \
-        -c "test -r \"\$1\"" sh "$ORDNER" 2>/dev/null; then
-        lesen="ja"
-    fi
+    while true; do
+        rechte_anzeigen
+        echo
+        echo "Gruppenverwaltung"
+        echo "-----------------"
+        echo "  [1] Verwaltete Ordnergruppe erstellen/verwenden"
+        echo "  [2] Vorhandene Gruppe als Besitzergruppe setzen"
+        echo "  [3] Gruppenrechte setzen"
+        echo "  [4] Rechte für alle anderen setzen"
+        echo "  [0] Zurück"
+        echo
+        printf "Auswahl: " >&3
+        read -r auswahl <&3
 
-    if su -s /bin/sh "$AUSGEWAEHLTER_BENUTZER" \
-        -c "test -w \"\$1\"" sh "$ORDNER" 2>/dev/null; then
-        schreiben="ja"
-    fi
-
-    if su -s /bin/sh "$AUSGEWAEHLTER_BENUTZER" \
-        -c "test -x \"\$1\"" sh "$ORDNER" 2>/dev/null; then
-        betreten="ja"
-    fi
-
-    printf '\nEffektiver Zugriff:\n'
-    printf '  Benutzer:  %s\n' "$AUSGEWAEHLTER_BENUTZER"
-    printf '  Ordner:    %s\n' "$ORDNER"
-    printf '  Lesen:     %s\n' "$lesen"
-    printf '  Schreiben: %s\n' "$schreiben"
-    printf '  Betreten:  %s\n' "$betreten"
+        case "$auswahl" in
+            1) verwaltete_gruppe_erstellen ;;
+            2) vorhandene_gruppe_auswaehlen ;;
+            3) gruppenrechte_setzen ;;
+            4) sonstige_rechte_setzen ;;
+            0) return ;;
+        esac
+    done
 }
 
-benutzer_auswaehlen
-gruppenname_erzeugen
-rechte_auswaehlen
+while true; do
+    rechte_anzeigen
+    echo
+    echo "Hauptmenü"
+    echo "---------"
+    echo "  [1] Benutzerzugriff prüfen oder verwalten"
+    echo "  [2] Gruppen und Rechte verwalten"
+    echo "  [3] Informationen aktualisieren"
+    echo "  [0] Beenden"
+    echo
+    printf "Auswahl: " >&3
+    read -r HAUPTAUSWAHL <&3
 
-if [ "$MODUS" = "pruefen" ]; then
-    zugriff_pruefen
-    exit 0
-fi
-
-if [ "$MODUS" = "entfernen" ]; then
-    if getent group "$GRUPPE" >/dev/null; then
-        gpasswd -d "$AUSGEWAEHLTER_BENUTZER" "$GRUPPE" 2>/dev/null || true
-        printf '\nBenutzer "%s" wurde aus Gruppe "%s" entfernt.\n' \
-            "$AUSGEWAEHLTER_BENUTZER" "$GRUPPE"
-    else
-        printf '\nDie verwaltete Gruppe "%s" existiert nicht.\n' "$GRUPPE"
-    fi
-
-    zugriff_pruefen
-    exit 0
-fi
-
-if ! getent group "$GRUPPE" >/dev/null; then
-    groupadd "$GRUPPE" ||
-        fehler "Gruppe konnte nicht erstellt werden: $GRUPPE"
-fi
-
-chgrp "$GRUPPE" "$ORDNER" ||
-    fehler "Gruppe des Ordners konnte nicht geändert werden."
-
-usermod -a -G "$GRUPPE" "$AUSGEWAEHLTER_BENUTZER" ||
-    fehler "Benutzer konnte nicht zur Gruppe hinzugefügt werden."
-
-case "$MODUS" in
-    r-x)
-        chmod g+rx,g-w "$ORDNER" ||
-            fehler "Ordnerrechte konnten nicht gesetzt werden."
-        ;;
-    rwx)
-        chmod g+rwx "$ORDNER" ||
-            fehler "Ordnerrechte konnten nicht gesetzt werden."
-        ;;
-esac
-
-printf '\nÄnderung durchgeführt:\n'
-printf '  Ordner:   %s\n' "$ORDNER"
-printf '  Benutzer: %s\n' "$AUSGEWAEHLTER_BENUTZER"
-printf '  Gruppe:   %s\n' "$GRUPPE"
-printf '  Rechte:   %s\n' "$MODUS"
-
-printf '\nAktuelle Ordnerinformationen:\n'
-ls -ld -- "$ORDNER"
-
-printf '\nGruppenmitgliedschaft:\n'
-id "$AUSGEWAEHLTER_BENUTZER"
-
-zugriff_pruefen
-
-printf '\nHinweis: Bei einer bestehenden Anmeldung kann eine neue Anmeldung\n'
-printf 'notwendig sein, damit die neue Gruppenmitgliedschaft wirksam wird.\n'
+    case "$HAUPTAUSWAHL" in
+        1) benutzer_verwalten ;;
+        2) gruppen_verwalten ;;
+        3) ;;
+        0)
+            echo "[✓] Beendet"
+            exit 0
+            ;;
+    esac
+done
