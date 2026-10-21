@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# curl -fsSL "https://raw.githubusercontent.com/florianthepro/debian-toolbox/main/fehlerfinder.sh" | bash
 
 set -u
 exec 3<>/dev/tty || { echo "Fehler: Kein Terminal verfügbar."; exit 1; }
