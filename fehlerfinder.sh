@@ -7,6 +7,8 @@ TMP="$(mktemp -d /tmp/fehlerfinder.XXXXXX)" || exit 1
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 ZIEL="localhost"
+DNS_SERVER=""
+ZIEL_IP=""
 SEITENGROESSE=8
 KATEGORIEN=()
 TITEL=()
@@ -22,26 +24,84 @@ anzahl() { [ -s "$TMP/$1" ] && awk 'END {print NR}' "$TMP/$1" || echo 0; }
 saeubern() { [ -s "$TMP/$1" ] || return 0; awk 'NF && !seen[$0]++' "$TMP/$1" > "$TMP/$1.new"; mv "$TMP/$1.new" "$TMP/$1"; }
 port_offen() { timeout 3 bash -c "</dev/tcp/$1/$2" >/dev/null 2>&1; }
 
+ziel_aufloesen() {
+    local ziel="$1" dns="${2:-}" ergebnis=""
+
+    if [[ "$ziel" =~ ^[0-9]+([.][0-9]+){3}$ ]] || [[ "$ziel" == *:* ]]; then
+        printf '%s' "$ziel"
+        return 0
+    fi
+
+    if [ -n "$dns" ]; then
+        if command -v dig >/dev/null 2>&1; then
+            ergebnis="$(dig +time=2 +tries=1 +short A "@$dns" "$ziel" 2>/dev/null | awk 'NR==1 {print; exit}')"
+        elif command -v nslookup >/dev/null 2>&1; then
+            ergebnis="$(nslookup "$ziel" "$dns" 2>/dev/null | awk '/^Address: / {print $2}' | tail -n 1)"
+        else
+            return 2
+        fi
+    else
+        ergebnis="$(getent ahostsv4 "$ziel" 2>/dev/null | awk 'NR==1 {print $1; exit}')"
+        [ -n "$ergebnis" ] || ergebnis="$(getent ahosts "$ziel" 2>/dev/null | awk 'NR==1 {print $1; exit}')"
+    fi
+
+    [ -n "$ergebnis" ] || return 1
+    printf '%s' "$ergebnis"
+}
+
+ziel_hilfe() {
+    bild
+    echo "Fehlerfinder"
+    echo
+    echo "ZIEL -dns DNS-SERVER"
+    echo
+    echo "Beispiele:"
+    echo "server.intern -dns 192.168.1.10"
+    echo "10.0.0.25 -dns 10.0.0.2"
+    echo
+    echo "Ohne -dns wird der DNS des Systems verwendet."
+    pause
+}
+
 ziel_waehlen() {
-    local eingabe=""
+    local eingabe="" teil1="" teil2="" teil3=""
+
     while true; do
         bild
         echo "Fehlerfinder"
         echo
-        printf 'IP/FQDN [localhost]: ' >&3
+        printf 'IP/FQDN/? [localhost]: ' >&3
         IFS= read -r eingabe <&3
         eingabe="${eingabe:-localhost}"
-        if [ "${eingabe,,}" = q ]; then
+
+        if [ "${eingabe,,}" = "q" ]; then
             bild
             exit 0
         fi
-        if [[ "$eingabe" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-            ZIEL="$eingabe"
+
+        if [ "$eingabe" = "?" ]; then
+            ziel_hilfe
+            continue
+        fi
+
+        read -r teil1 teil2 teil3 _ <<< "$eingabe"
+        DNS_SERVER=""
+
+        if [ "${teil2:-}" = "-dns" ]; then
+            if [ -z "${teil3:-}" ]; then
+                continue
+            fi
+            DNS_SERVER="$teil3"
+        elif [ -n "${teil2:-}" ]; then
+            continue
+        fi
+
+        if [[ "$teil1" =~ ^[A-Za-z0-9._:-]+$ ]] && { [ -z "$DNS_SERVER" ] || [[ "$DNS_SERVER" =~ ^[A-Za-z0-9._:-]+$ ]]; }; then
+            ZIEL="$teil1"
             return
         fi
     done
 }
-
 lokale_kategorien() {
     KATEGORIEN=(dienste speicher netzwerk pakete kernel system prozesse dateisystem)
     TITEL=("Dienste" "Speicher und Leistung" "Netzwerk" "Pakete" "Kernel und Hardware" "System" "Prozesse" "Dateisysteme")
@@ -119,45 +179,61 @@ lokal_scannen() {
 }
 
 extern_scannen() {
-    local kategorie ip zeit port code
+    local kategorie ip zeit port code pruefziel dns_status
     externe_kategorien
     for kategorie in "${KATEGORIEN[@]}"; do : > "$TMP/$kategorie"; done
 
-    ping -c 1 -W 2 "$ZIEL" >/dev/null 2>&1 || add erreichbarkeit "$ZIEL|Antwortet nicht auf Ping"
-    port_offen "$ZIEL" 443 || port_offen "$ZIEL" 80 || port_offen "$ZIEL" 22 || add erreichbarkeit "$ZIEL|Kein geprüfter Standarddienst erreichbar"
+    dns_status=0
+    ip="$(ziel_aufloesen "$ZIEL" "$DNS_SERVER")" || dns_status=$?
+    ZIEL_IP="$ip"
 
-    ip="$(getent ahosts "$ZIEL" 2>/dev/null | awk 'NR==1 {print $1}')"
-    [ -z "$ip" ] && add namensaufloesung "$ZIEL|Name kann nicht aufgelöst werden"
+    if [ "$dns_status" -eq 2 ]; then
+        add namensaufloesung "$ZIEL|Benutzerdefinierter DNS benötigt dig oder nslookup"
+    elif [ -z "$ip" ]; then
+        add namensaufloesung "$ZIEL|Name kann über ${DNS_SERVER:-System-DNS} nicht aufgelöst werden"
+    fi
+
+    pruefziel="${ip:-$ZIEL}"
+    ping -c 1 -W 2 "$pruefziel" >/dev/null 2>&1 || add erreichbarkeit "$ZIEL|Antwortet nicht auf Ping"
+    port_offen "$pruefziel" 443 || port_offen "$pruefziel" 80 || port_offen "$pruefziel" 22 || add erreichbarkeit "$ZIEL|Kein geprüfter Standarddienst erreichbar"
     if [[ "$ZIEL" =~ ^[0-9a-fA-F:.]+$ ]]; then
         getent hosts "$ZIEL" >/dev/null 2>&1 || add namensaufloesung "$ZIEL|Kein Rückwärtsname gefunden"
     fi
 
-    ip route get "$ZIEL" >/dev/null 2>&1 || add route "$ZIEL|Keine Route zum Ziel gefunden"
+    ip route get "$pruefziel" >/dev/null 2>&1 || add route "$ZIEL|Keine Route zum Ziel gefunden"
 
     for port in 22 25 53 80 110 143 443 3389; do
-        port_offen "$ZIEL" "$port" || add ports "Port $port|Nicht erreichbar"
+        port_offen "$pruefziel" "$port" || add ports "Port $port|Nicht erreichbar"
     done
 
     if command -v curl >/dev/null 2>&1; then
-        code="$(curl -kLsS -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' "http://$ZIEL" 2>/dev/null || true)"
+        if [ -n "$ip" ] && [ "$ip" != "$ZIEL" ]; then
+            code="$(curl -kLsS -o /dev/null --connect-timeout 4 --max-time 8 --resolve "$ZIEL:80:$ip" -w '%{http_code}' "http://$ZIEL" 2>/dev/null || true)"
+        else
+            code="$(curl -kLsS -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' "http://$ZIEL" 2>/dev/null || true)"
+        fi
         [[ "$code" =~ ^[1-5][0-9][0-9]$ ]] || add web "HTTP|Keine gültige Antwort auf Port 80"
-        code="$(curl -kLsS -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' "https://$ZIEL" 2>/dev/null || true)"
+        if [ -n "$ip" ] && [ "$ip" != "$ZIEL" ]; then
+            code="$(curl -kLsS -o /dev/null --connect-timeout 4 --max-time 8 --resolve "$ZIEL:443:$ip" -w '%{http_code}' "https://$ZIEL" 2>/dev/null || true)"
+        else
+            code="$(curl -kLsS -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' "https://$ZIEL" 2>/dev/null || true)"
+        fi
         [[ "$code" =~ ^[1-5][0-9][0-9]$ ]] || add web "HTTPS|Keine gültige Antwort auf Port 443"
     else
-        port_offen "$ZIEL" 80 || add web "HTTP|Port 80 nicht erreichbar"
-        port_offen "$ZIEL" 443 || add web "HTTPS|Port 443 nicht erreichbar"
+        port_offen "$pruefziel" 80 || add web "HTTP|Port 80 nicht erreichbar"
+        port_offen "$pruefziel" 443 || add web "HTTPS|Port 443 nicht erreichbar"
     fi
 
-    port_offen "$ZIEL" 22 || add ssh "SSH|Port 22 nicht erreichbar"
+    port_offen "$pruefziel" 22 || add ssh "SSH|Port 22 nicht erreichbar"
 
-    if command -v openssl >/dev/null 2>&1 && port_offen "$ZIEL" 443; then
-        timeout 6 openssl s_client -connect "$ZIEL:443" -servername "$ZIEL" </dev/null 2>/dev/null |
+    if command -v openssl >/dev/null 2>&1 && port_offen "$pruefziel" 443; then
+        timeout 6 openssl s_client -connect "$pruefziel:443" -servername "$ZIEL" </dev/null 2>/dev/null |
             openssl x509 -checkend 0 -noout >/dev/null 2>&1 || add tls "TLS-Zertifikat|Ungültig, abgelaufen oder nicht lesbar"
-    elif ! port_offen "$ZIEL" 443; then
+    elif ! port_offen "$pruefziel" 443; then
         add tls "TLS|Port 443 nicht erreichbar"
     fi
 
-    zeit="$(ping -c 2 -W 2 "$ZIEL" 2>/dev/null | awk -F'/' '/^rtt|^round-trip/ {print $5}')"
+    zeit="$(ping -c 2 -W 2 "$pruefziel" 2>/dev/null | awk -F'/' '/^rtt|^round-trip/ {print $5}')"
     if [ -n "$zeit" ] && awk -v t="$zeit" 'BEGIN {exit !(t>200)}'; then
         add antwortzeit "$ZIEL|Hohe mittlere Antwortzeit: $zeit ms"
     elif [ -z "$zeit" ]; then
