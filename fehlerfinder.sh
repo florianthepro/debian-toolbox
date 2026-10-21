@@ -14,22 +14,80 @@ PRUEFUNGEN=()
 bild(){ printf '\033[2J\033[H'; }
 taste(){ local n="$1" v=""; IFS= read -rsn1 v <&3 || exit 0; printf -v "$n" '%s' "$v"; }
 pause(){ local k; echo; echo "Taste drücken ..."; taste k; }
-kopf(){ local weg="${1:-}"; bild; printf 'Fehlerfinder [%s]' "$ZIEL"; [ -n "$weg" ] && printf '/%s' "$weg"; printf '\n\n'; }
+kopf(){
+ local weg="${1:-}"
+ bild
+ printf 'Fehlerfinder [%s]' "$ZIEL"
+ [ -n "$weg" ] && printf '/%s' "$weg"
+ printf '
+'
+ printf 'DNS: %s
+
+' "${DNS_SERVER:-Systemstandard}"
+}
 add(){ printf '%s\n' "$2" >> "$TMP/$1"; }
 anzahl(){ [ -s "$TMP/$1" ] && awk 'END{print NR}' "$TMP/$1" || echo 0; }
 sauber(){ [ -s "$TMP/$1" ] || return; awk 'NF&&!a[$0]++' "$TMP/$1" > "$TMP/x"; mv "$TMP/x" "$TMP/$1"; }
 port(){ timeout 3 bash -c "</dev/tcp/$1/$2" >/dev/null 2>&1; }
 
-hilfe(){ bild; echo "Fehlerfinder"; echo; echo "ZIEL -dns DNS-SERVER"; echo; echo "server.intern -dns 192.168.1.10"; echo "10.0.0.25 -dns 10.0.0.2"; echo; echo "Ohne -dns wird der System-DNS verwendet."; pause; }
+hilfe(){
+ bild
+ echo "Fehlerfinder/Ziel und DNS/Hilfe"
+ echo
+ echo "Ziel:       IP-Adresse, FQDN oder localhost"
+ echo "DNS-Server: leer verwendet die normale Systemauflösung"
+ echo
+ echo "Beispiele:"
+ echo "Ziel:       server.intern"
+ echo "DNS-Server: 192.168.1.10"
+ echo
+ echo "Bei einer IP-Adresse ist kein DNS-Server notwendig."
+ pause
+}
 
-ziel(){
- local e a b c
+einstellungen(){
+ local key wert
  while true; do
-  bild; echo "Fehlerfinder"; echo; printf 'IP/FQDN/Q/? [localhost]: ' >&3; IFS= read -r e <&3; e="${e:-localhost}"
-  [ "${e,,}" = q ] && { bild; exit 0; }; [ "$e" = ? ] && { hilfe; continue; }
-  read -r a b c _ <<< "$e"; DNS_SERVER=""
-  if [ "${b:-}" = -dns ] && [ -n "${c:-}" ]; then DNS_SERVER="$c"; elif [ -n "${b:-}" ]; then continue; fi
-  if [[ "$a" =~ ^[A-Za-z0-9._:-]+$ ]]; then ZIEL="$a"; return; fi
+  bild
+  echo "Fehlerfinder/Ziel und DNS"
+  echo
+  echo "[1] Ziel        ${ZIEL:-localhost}"
+  echo "[2] DNS-Server  ${DNS_SERVER:-Systemstandard}"
+  echo
+  echo "[3] Änderungen anwenden"
+  echo "[4] Auf localhost zurücksetzen"
+  echo "[?] Hilfe"
+  echo "[Z] Zurück"
+  echo "[Q] Quit"
+  taste key
+  case "${key,,}" in
+   1)
+    printf '\nZiel [localhost]: ' >&3
+    IFS= read -r wert <&3
+    wert="${wert:-localhost}"
+    [[ "$wert" =~ ^[A-Za-z0-9._:-]+$ ]] && ZIEL="$wert"
+    ;;
+   2)
+    printf '\nDNS-Server [Systemstandard]: ' >&3
+    IFS= read -r wert <&3
+    if [ -z "$wert" ]; then DNS_SERVER=""
+    elif [[ "$wert" =~ ^[A-Za-z0-9._:-]+$ ]]; then DNS_SERVER="$wert"
+    fi
+    ;;
+   3)
+    scan
+    return
+    ;;
+   4)
+    ZIEL="localhost"
+    DNS_SERVER=""
+    scan
+    return
+    ;;
+   \?) hilfe ;;
+   z) return ;;
+   q) bild; exit 0 ;;
+  esac
  done
 }
 
@@ -93,7 +151,32 @@ fehler(){
 menu(){
  local i kat n total key idx; local -a fk=() ft=() fp=()
  for((i=0;i<${#KATEGORIEN[@]};i++));do kat="${KATEGORIEN[$i]}";n="$(anzahl "$kat")";[ "$n" -gt 0 ]&&{ fk+=("$kat");ft+=("${TITEL[$i]}");fp+=("${PRUEFUNGEN[$i]}");};done; total="${#fk[@]}"
- while true; do kopf; if [ "$total" -eq 0 ];then echo "Keine Fehler gefunden.";else for((i=0;i<total&&i<8;i++));do printf '[%d] %s/%s %s\n' "$((i+1))" "$(anzahl "${fk[$i]}")" "${fp[$i]}" "${ft[$i]}";done;echo;printf '1-%d/%d\n' "$total" "$total";fi;echo;echo "[Z] Ziel ändern";echo "[Q] Quit";taste key;case "${key,,}" in [1-8])idx=$((key-1));[ "$idx" -lt "$total" ]&&fehler "${fk[$idx]}" "${ft[$idx]}";;z)return;;q)bild;exit;;esac;done
+ while true; do
+  kopf
+  if [ "$total" -eq 0 ]; then
+   echo "Keine Fehler gefunden."
+  else
+   for((i=0;i<total&&i<8;i++)); do
+    printf '[%d] %s/%s %s\n' "$((i+1))" "$(anzahl "${fk[$i]}")" "${fp[$i]}" "${ft[$i]}"
+   done
+   echo
+   printf '1-%d/%d\n' "$total" "$total"
+  fi
+  echo
+  echo "[E] Ziel und DNS"
+  echo "[R] Erneut prüfen"
+  echo "[Q] Quit"
+  taste key
+  case "${key,,}" in
+   [1-8]) idx=$((key-1)); [ "$idx" -lt "$total" ] && fehler "${fk[$idx]}" "${ft[$idx]}" ;;
+   e) einstellungen; return ;;
+   r) scan; return ;;
+   q) bild; exit ;;
+  esac
+ done
 }
 
-while true; do ziel; scan; menu; done
+ZIEL="localhost"
+DNS_SERVER=""
+scan
+while true; do menu; done
