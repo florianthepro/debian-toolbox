@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Direkt ausführen: curl -fsSL https://raw.githubusercontent.com/florianthepro/debian-toolbox/main/permissions/ordner-rechte.sh | sudo env STARTORDNER="$PWD" bash
 
 set -u
 
