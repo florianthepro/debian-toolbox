@@ -24,3 +24,8 @@ Direkt ausführen:
 curl -fsSL https://raw.githubusercontent.com/florianthepro/debian-toolbox/main/err.sh | sudo bash
 ```
 ---
+#### Docker VErwaltung
+Direkt ausführen:
+```bash
+curl -fsSL https://raw.githubusercontent.com/florianthepro/debian-toolbox/main/docker-verwaltung.sh | sudo bash
+```
